@@ -8,7 +8,11 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20230419.0",
+    "@octokit/types": "^12.0.0",
     "typescript": "^5.0.4",
     "wrangler": "^3.0.0"
+  },
+  "dependencies": {
+    "@rollup/browser": "^3.29.3"
   }
 }
