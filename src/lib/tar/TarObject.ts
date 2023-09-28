@@ -12,29 +12,29 @@ export const TAR_OBJECT_TYPE_GNU_NEXT_LINK_NAME = 'K' as const;
 export const TAR_OBJECT_TYPE_GNU_NEXT_NAME = 'L' as const;
 
 export type TarObjectHeader = {
-	name: string,
-	mode: Uint8Array,
-	userId: number,
-	groupId: number,
-	size: number,
-	modifiedTime: number,
-	checksum: Uint8Array,
-	type: string,
-	linkName: string,
-	/* UStar */
-	magicBytes: string,
-	version: Uint8Array,
-	userName: string,
-	groupName: string,
-	deviceMajorNumber: Uint8Array,
-	deviceMinorNumber: Uint8Array,
-	prefix: string,
-	attrs: Record<string, string>,
-}
+  name: string,
+  mode: Uint8Array,
+  userId: number,
+  groupId: number,
+  size: number,
+  modifiedTime: number,
+  checksum: Uint8Array,
+  type: string,
+  linkName: string,
+  /* UStar */
+  magicBytes: string,
+  version: Uint8Array,
+  userName: string,
+  groupName: string,
+  deviceMajorNumber: Uint8Array,
+  deviceMinorNumber: Uint8Array,
+  prefix: string,
+  attrs: Record<string, string>,
+};
 
 export type TarObject = {
-	header: TarObjectHeader,
-	body?: ReadableStream<Uint8Array>,
-}
+  header: TarObjectHeader,
+  body?: ReadableStream<Uint8Array>,
+};
 
-export type TarObjectCallback = (obj: TarObject) => void | Promise<void>;
+export type TarObjectCallback = (obj: TarObject) => Promise<void>;
