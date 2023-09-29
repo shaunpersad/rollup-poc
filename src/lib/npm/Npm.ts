@@ -1,8 +1,11 @@
+import { clampedAll } from 'clamped-promise-all';
 import Filesystem, { normalizePath } from '../Filesystem';
+import retryableFetch from '../retryableFetch';
 
 type PackageJson = {
   version: string,
   dependencies?: Record<string, string>,
+  files?: string[],
 };
 
 type PackageLock = {
@@ -32,7 +35,7 @@ export default class Npm {
     this.filesystem = filesystem;
   }
 
-  async install() {
+  async install(parallelism = 5) {
     const exists = this.filesystem.getPackageJson();
     if (!exists) {
       console.log('no package.json file');
@@ -49,47 +52,56 @@ export default class Npm {
         }
       }
     }
-    for (const [name, version] of specificVersions) {
-      const response = await fetch(`https://unpkg.com/${name}@${version}/?meta`, {
-        cf: { cacheEverything: true },
-      });
-      if (!response.ok) {
-        throw new Error(`${response.status} ${await response.text()}`);
-      }
-      const specificVersion = normalizePath(new URL(response.url).pathname).split('@').pop() || 'latest';
-      const meta = await response.json<UnpkgMeta>();
-      await this.processMeta(name, specificVersion, meta, `node_modules/${name}`);
-    }
+    await clampedAll(
+      Array.from(specificVersions.entries()).map(
+        ([lockName, version]) => async () => {
+          const name = lockName.split('/node_modules/').pop() || '';
+          const versionLookup = await retryableFetch(`https://unpkg.com/${name}@${version}/?meta`, {
+            cf: { cacheEverything: true },
+          });
+          if (!versionLookup.ok) {
+            throw new Error(`${versionLookup.status} ${await versionLookup.text()}`);
+          }
+          const specificVersion = normalizePath(new URL(versionLookup.url).pathname).split('@').pop() || 'latest';
+
+          const packageJsonLookup = await retryableFetch(`https://ga.jspm.io/npm:${name}@${specificVersion}/package.json`, {
+            cf: { cacheEverything: true },
+          });
+          if (!packageJsonLookup.ok) {
+            console.log({ name, version, specificVersion });
+            throw new Error(`${packageJsonLookup.url} ${packageJsonLookup.status} ${await packageJsonLookup.text()}`);
+          }
+          const jspmPackageJson = await packageJsonLookup.json<PackageJson>();
+          for (const file of jspmPackageJson.files || []) {
+            await this.processMeta(name, specificVersion, { path: file, type: 'file' }, `node_modules/${lockName}`);
+          }
+        },
+      ),
+      parallelism,
+    );
   }
 
-  protected async processMeta(name: string, version: string, meta: UnpkgMeta, installDir: string) {
+  protected async processMeta(name: string, version: string, meta: UnpkgMeta, installPath: string) {
     if (meta.type === 'file') {
       const normalizedFilePath = normalizePath(meta.path);
       // console.log(JSON.stringify({ name, version, installDir, normalizedFilePath, metaPath: meta.path }, null, 2));
       const loader = async () => {
-        const response = await fetch(`https://unpkg.com/${name}@${version}/${normalizedFilePath}`, {
+        // const response = await retryableFetch(`https://unpkg.com/${name}@${version}/${normalizedFilePath}`, {
+        //   cf: { cacheEverything: true },
+        // });
+        const response = await retryableFetch(`https://ga.jspm.io/npm:${name}@${version}/${normalizedFilePath}`, {
           cf: { cacheEverything: true },
         });
         if (!response.ok) {
-          throw new Error(`${response.status} ${await response.text()}`);
+          return '';
+          // throw new Error(`${response.status} ${await response.text()}`);
         }
-        return response.body!;
+        return response.text();
       };
-      return this.filesystem.createFile(
-        `${installDir}/${normalizedFilePath}`,
-        await loader(),
-        async () => {
-          const body = await loader();
-          let str = '';
-          for await (const chunk of body.pipeThrough(new TextDecoderStream())) {
-            str += chunk;
-          }
-          return str;
-        },
-      );
+      return this.filesystem.createFile(`${installPath}/${normalizedFilePath}`, loader);
     }
     for (const subMeta of meta.files) {
-      await this.processMeta(name, version, subMeta, installDir);
+      await this.processMeta(name, version, subMeta, installPath);
     }
   }
 }

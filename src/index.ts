@@ -1,6 +1,14 @@
 import { rollup } from '@rollup/browser';
-import { ModuleResolutionHost, ModuleResolutionKind, resolveModuleName } from 'typescript';
+import {
+  CompilerOptions,
+  ModuleResolutionHost,
+  ModuleResolutionKind,
+  ScriptTarget,
+  resolveModuleName,
+  transpileModule,
+} from 'typescript';
 import Filesystem from './lib/Filesystem';
+import createHash from './lib/createHash';
 import GitHubApi from './lib/git/GitHubApi';
 import Npm from './lib/npm/Npm';
 
@@ -23,8 +31,8 @@ export interface Env {
 }
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const filesystem = new Filesystem(env);
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const filesystem = new Filesystem();
     const npm = new Npm(filesystem);
 
     /**
@@ -32,22 +40,49 @@ export default {
      */
     const githubParams = {
       owner: 'shaunpersad',
-      repo: 'rollup-poc',
+      // repo: 'throttled-queue',
+      repo: 'marketwatchlist.io',
       // repo: 'tar-test',
       // ref: 'ccefb38',
     };
+    const entryPoint = 'src/server.ts';
     const github = new GitHubApi(env.GITHUB_TOKEN);
+    const localFileHashes = new Map<string, string>();
     await github.getRepoFiles({
       ...githubParams,
       forEach: async ({ name, body }) => {
-        // console.log(name);
-        await filesystem.createFile(name, body);
+        const hash = await createHash(body);
+        localFileHashes.set(name, hash);
       },
     });
     await github.getRepoFiles({
       ...githubParams,
       forEach: async ({ name, body, size }) => {
-        await filesystem.persistFile(name, body, size);
+        const hash = localFileHashes.get(name);
+        if (!hash) {
+          return;
+        }
+        const exists = await env.FILES.head(hash);
+        if (!exists) {
+          await env.FILES.put(hash, body.pipeThrough(new FixedLengthStream(size)), {
+            sha256: hash,
+            httpMetadata: {
+              cacheControl: 'public, max-age=31536000, s-maxage=31536000, immutable',
+            },
+          });
+        }
+        const loader = async () => {
+          const obj = await env.FILES.get(hash);
+          if (!obj) {
+            throw new Error(`Expected object ${hash} to be saved.`);
+          }
+          let str = '';
+          for await (const chunk of obj.body.pipeThrough(new TextDecoderStream())) {
+            str += chunk;
+          }
+          return str;
+        };
+        await filesystem.createFile(name, loader);
       },
     });
 
@@ -55,71 +90,109 @@ export default {
      * Perform the equivalent of "npm install"
      */
     await npm.install();
-    console.log('files', JSON.stringify([...filesystem.hashes], null, 2));
+    // console.log('files', JSON.stringify([...filesystem.hashes], null, 2));
 
     /**
      * Setup TypeScript "host"
      */
     const host: ModuleResolutionHost = {
       fileExists(fileName: string) {
-        console.log('looking for', fileName);
+        // console.log('looking for', fileName);
         return filesystem.fileExists(fileName);
       },
       // readFile function is used to read arbitrary text files on disk, i.e. when resolution procedure needs the content of 'package.json'
       // to determine location of bundled typings for node module
       readFile(fileName: string) {
-        console.log('reading', fileName);
+        // console.log('reading', fileName);
         if (fileName === 'package.json' || fileName.endsWith('/package.json')) {
           const loader = filesystem.getPackageJson(fileName.slice(0, 'package.json'.length * -1));
           return loader?.packageJson;
         }
-        return undefined;
+        throw new Error(`Resolver attempted to load ${fileName}`);
       },
       trace(s: string) {
         console.log('tracing', s);
       },
       directoryExists(directoryName: string) {
-        console.log('directory check', directoryName);
+        // console.log('directory check', directoryName);
         return filesystem.directoryExists(directoryName);
       },
     };
+    const tsConfigLoader = filesystem.files.get('tsconfig.json') || filesystem.files.get('jsconfig.json');
+    const tsConfigText = tsConfigLoader ? await tsConfigLoader() : '';
+    const tsConfig = tsConfigText ? JSON.parse(tsConfigText) : {};
+    const compilerOptions: CompilerOptions = {
+      ...tsConfig.compilerOptions,
+      allowJs: true,
+      moduleResolution: ModuleResolutionKind.NodeNext,
+      resolveJsonModule: true,
+      esModuleInterop: true,
+      target: ScriptTarget.ESNext,
+      lib: ['esnext'],
+      customConditions: ['worker', 'browser', 'esm', 'import', 'module'],
+      sourceMap: false,
+      declaration: false,
+      noDtsResolution: true,
+    };
 
+    // todo: https://rollupjs.org/configuration-options/#output-manualchunks
     const bundle = await rollup({
-      input: 'src/index.js',
+      input: entryPoint,
+      maxParallelFileOps: 5,
+      output: {
+        generatedCode: {
+          constBindings: true,
+        },
+      },
       plugins: [
         {
           name: 'loader',
           resolveId(source, importer) {
+            // console.log('resolving', { source, importer });
             if (!importer) {
               return source;
             }
             const result = resolveModuleName(
               source,
               importer,
-              {
-                allowJs: true,
-                moduleResolution: ModuleResolutionKind.Node16,
-                resolveJsonModule: true,
-                noDtsResolution: true,
-                esModuleInterop: true,
-              },
+              compilerOptions,
               host,
             );
             if (result.resolvedModule) {
-              return result.resolvedModule.resolvedFileName;
+              // console.log(result.resolvedModule);
+              return {
+                id: result.resolvedModule.resolvedFileName,
+                external: false,
+              };
             }
+            console.log('external:', source, importer);
+            return { id: source, external: true };
+            // console.error(JSON.stringify(result, null, 2));
+            // throw new Error(`could not resolve module source: ${source}, importer: ${importer}`);
           },
-          load(id) {
+          async load(id) {
+            // console.log('loading', id);
             const loader = filesystem.files.get(id);
             if (loader) {
-              return loader();
+              const text = await loader();
+              const result = transpileModule(text, {
+                compilerOptions,
+                fileName: id,
+              });
+              return result.outputText;
             }
+            console.error(JSON.stringify(id, null, 2));
+            throw new Error('could not load module');
           },
         },
       ],
     });
-    const output = await bundle.generate({ format: 'es' });
+    const { output } = await bundle.generate({ format: 'es' });
 
-    return new Response(JSON.stringify(output, null, 2));
+    return new Response(JSON.stringify({ ...output, size: output[0].code.length }, null, 2), {
+      headers: {
+        'content-type': 'application/json',
+      },
+    });
   },
 };

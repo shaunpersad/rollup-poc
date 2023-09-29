@@ -44,7 +44,9 @@ export default class GitHubApi {
           async write({ header: { type, name, size, attrs }, body }: TarObject) {
             // console.log(JSON.stringify({ type, name, size }, null, 2));
             if (name && body && type === TAR_OBJECT_TYPE_FILE) {
-              await forEach({ name: name.replace(`${owner}-${repo}-${attrs.comment}/`, ''), body, size });
+              const [_, ...rest] = name.split('/');
+              const extracted = rest.join('/');
+              await forEach({ name: extracted, body, size });
             }
           },
         }));

@@ -1,8 +1,7 @@
-import { Env } from '../types';
-
 export type FilePath = string;
 export type FileLoader = (() => Promise<string> | string);
-export type Sha256Hash = string;
+
+const SYNC_FILES = ['package.json', 'package-lock.json', 'tsconfig.json', 'jsconfig.json'];
 
 export function normalizePath(directoryOrFile: string) {
   if (directoryOrFile.endsWith('/')) {
@@ -17,78 +16,14 @@ export function normalizePath(directoryOrFile: string) {
 export default class Filesystem {
   readonly files = new Map<FilePath, FileLoader>();
 
-  readonly hashes = new Map<FilePath, Sha256Hash>();
-
-  protected env: Env;
-
-  constructor(env: Env) {
-    this.env = env;
-  }
-
-  static async createHash(body: ReadableStream<Uint8Array>, save: boolean) {
-    const digestStream = new crypto.DigestStream('SHA-256');
-    // await body.pipeTo(digestStream); // todo why doesn't this work?
-    const writer = digestStream.getWriter();
-    let saved = '';
-    for await (const chunk of body) {
-      await writer.ready;
-      await writer.write(chunk);
-      if (save) {
-        saved += new TextDecoder().decode(chunk);
-      }
+  async createFile(path: string, loader: FileLoader) {
+    const normalizedPath = normalizePath(path);
+    const fileName = normalizedPath.split('/').pop() || '';
+    if (SYNC_FILES.includes(fileName)) {
+      const text = await loader();
+      loader = () => text;
     }
-    await writer.ready;
-    await writer.close();
-    const digest = await digestStream.digest;
-    const hash = [...new Uint8Array(digest)]
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('');
-    return { hash, saved };
-  }
-
-  async createFile(path: string, body: ReadableStream<Uint8Array>, loader?: FileLoader) {
-    const normalizedPath = path.startsWith('/') ? path.replace('/', '') : path;
-    const fileName = normalizedPath.split('/').pop();
-    const { hash, saved } = await Filesystem.createHash(
-      body,
-      fileName === 'package.json' || fileName === 'package-lock.json',
-    );
-
-    this.hashes.set(normalizedPath, hash);
-    if (saved) {
-      this.files.set(normalizedPath, () => saved);
-      return;
-    }
-    this.files.set(
-      normalizedPath,
-      loader || (async () => {
-        const obj = await this.env.FILES.get(hash);
-        if (obj) {
-          let str = '';
-          for await (const chunk of obj.body.pipeThrough(new TextDecoderStream())) {
-            str += chunk;
-          }
-          return str;
-        }
-        return '';
-      }),
-    );
-  }
-
-  async persistFile(path: string, body: ReadableStream<Uint8Array>, size: number) {
-    const hash = this.hashes.get(path);
-    if (!hash) {
-      throw new Error(`Could not find hash for ${path}`);
-    }
-    const exists = await this.env.FILES.head(hash);
-    if (!exists) {
-      await this.env.FILES.put(hash, body.pipeThrough(new FixedLengthStream(size)), {
-        sha256: hash,
-        httpMetadata: {
-          cacheControl: 'public, max-age=31536000, s-maxage=31536000, immutable',
-        },
-      });
-    }
+    this.files.set(normalizedPath, loader);
   }
 
   fileExists(path: string) {
