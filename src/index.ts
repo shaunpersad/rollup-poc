@@ -31,9 +31,9 @@ export default {
      */
     const output = await bundler.bundle('src/server.ts');
 
-    return new Response(JSON.stringify({ ...output, size: output[0].code.length }, null, 2), {
+    return new Response(output[0].code, {
       headers: {
-        'content-type': 'application/json',
+        'content-type': 'text/javascript',
       },
     });
   },

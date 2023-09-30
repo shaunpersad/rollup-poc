@@ -38,6 +38,8 @@ export default class Bundler {
       output: {
         generatedCode: {
           constBindings: true,
+          objectShorthand: true,
+          preset: 'es2015',
         },
         format: 'es',
       },
@@ -56,9 +58,11 @@ export default class Bundler {
               tsHost,
             );
             if (result.resolvedModule) {
+              const { resolvedFileName } = result.resolvedModule;
               return {
-                id: result.resolvedModule.resolvedFileName,
+                id: resolvedFileName,
                 external: false,
+                moduleSideEffects: false,
               };
             }
             console.log('external:', source, importer);
@@ -67,6 +71,7 @@ export default class Bundler {
           load: async (id) => {
             const text = await this.filesystem.readFile(id);
             if (text) {
+              // console.log('[load]', id);
               const result = transpileModule(text, {
                 compilerOptions,
                 fileName: id,
