@@ -1,5 +1,5 @@
 import { clampedAll } from 'clamped-promise-all';
-import Filesystem, { normalizePath } from '../Filesystem';
+import Filesystem, { normalizePath } from '../fs/Filesystem';
 import retryableFetch from '../retryableFetch';
 
 type PackageJson = {
@@ -8,7 +8,7 @@ type PackageJson = {
   files?: string[],
 };
 
-type PackageLock = {
+export type PackageLock = {
   packages?: Record<string, {
     version: string,
     resolved: string,
@@ -16,64 +16,40 @@ type PackageLock = {
   }>
 };
 
-type UnpkgMeta = {
-  path: string
-} & (
-  {
-    type: 'directory',
-    files: UnpkgMeta[],
-  } |
-  {
-    type: 'file',
-  }
-);
+export class NpmError extends Error {}
 
 export default class Npm {
-  protected filesystem: Filesystem;
+  protected readonly filesystem: Filesystem;
 
   constructor(filesystem: Filesystem) {
     this.filesystem = filesystem;
   }
 
   async install(parallelism = 5) {
-    const exists = this.filesystem.getPackageJson();
-    if (!exists) {
-      console.log('no package.json file');
-      return;
+    const packageLockFile = this.filesystem.getSyncHost().readFile('package-lock.json');
+    if (!packageLockFile) {
+      throw new NpmError('no package-lock.json file found.');
     }
-    const { packageJson, packageLock } = exists;
-    const { dependencies = {} } = JSON.parse(packageJson) as PackageJson;
-    const specificVersions = new Map<string, string>(Object.entries(dependencies));
-    if (packageLock) {
-      const { packages = {} } = JSON.parse(packageLock) as PackageLock;
-      for (const [name, info] of Object.entries(packages)) {
-        if (name.startsWith('node_modules/') && !info.dev) {
-          specificVersions.set(name.replace('node_modules/', ''), info.version);
-        }
+    const { packages = {} } = JSON.parse(packageLockFile) as PackageLock;
+    const specificVersions = new Map<string, string>();
+    for (const [name, info] of Object.entries(packages)) {
+      if (name.startsWith('node_modules/') && !info.dev) {
+        specificVersions.set(name.replace('node_modules/', ''), info.version);
       }
     }
     await clampedAll(
       Array.from(specificVersions.entries()).map(
         ([lockName, version]) => async () => {
           const name = lockName.split('/node_modules/').pop() || '';
-          const versionLookup = await retryableFetch(`https://unpkg.com/${name}@${version}/?meta`, {
-            cf: { cacheEverything: true },
-          });
-          if (!versionLookup.ok) {
-            throw new Error(`${versionLookup.status} ${await versionLookup.text()}`);
-          }
-          const specificVersion = normalizePath(new URL(versionLookup.url).pathname).split('@').pop() || 'latest';
-
-          const packageJsonLookup = await retryableFetch(`https://ga.jspm.io/npm:${name}@${specificVersion}/package.json`, {
+          const packageJsonLookup = await retryableFetch(`https://ga.jspm.io/npm:${name}@${version}/package.json`, {
             cf: { cacheEverything: true },
           });
           if (!packageJsonLookup.ok) {
-            console.log({ name, version, specificVersion });
-            throw new Error(`${packageJsonLookup.url} ${packageJsonLookup.status} ${await packageJsonLookup.text()}`);
+            throw new NpmError(`${packageJsonLookup.url} ${packageJsonLookup.status} ${await packageJsonLookup.text()}`);
           }
           const jspmPackageJson = await packageJsonLookup.json<PackageJson>();
-          for (const file of jspmPackageJson.files || []) {
-            await this.processMeta(name, specificVersion, { path: file, type: 'file' }, `node_modules/${lockName}`);
+          for (const filePath of jspmPackageJson.files || []) {
+            await this.processMeta(name, version, filePath, `node_modules/${lockName}`);
           }
         },
       ),
@@ -81,27 +57,17 @@ export default class Npm {
     );
   }
 
-  protected async processMeta(name: string, version: string, meta: UnpkgMeta, installPath: string) {
-    if (meta.type === 'file') {
-      const normalizedFilePath = normalizePath(meta.path);
-      // console.log(JSON.stringify({ name, version, installDir, normalizedFilePath, metaPath: meta.path }, null, 2));
-      const loader = async () => {
-        // const response = await retryableFetch(`https://unpkg.com/${name}@${version}/${normalizedFilePath}`, {
-        //   cf: { cacheEverything: true },
-        // });
-        const response = await retryableFetch(`https://ga.jspm.io/npm:${name}@${version}/${normalizedFilePath}`, {
-          cf: { cacheEverything: true },
-        });
-        if (!response.ok) {
-          return '';
-          // throw new Error(`${response.status} ${await response.text()}`);
-        }
-        return response.text();
-      };
-      return this.filesystem.createFile(`${installPath}/${normalizedFilePath}`, loader);
-    }
-    for (const subMeta of meta.files) {
-      await this.processMeta(name, version, subMeta, installPath);
-    }
+  protected async processMeta(name: string, version: string, filePath: string, installPath: string) {
+    const normalizedFilePath = normalizePath(filePath);
+    const loader = async () => {
+      const response = await retryableFetch(`https://ga.jspm.io/npm:${name}@${version}/${normalizedFilePath}`, {
+        cf: { cacheEverything: true },
+      });
+      if (!response.ok) {
+        throw new NpmError(`Could not fetch ${name} ${version} ${filePath}: ${response.status} ${await response.text()}`);
+      }
+      return response.text();
+    };
+    return this.filesystem.createFile(`${installPath}/${normalizedFilePath}`, loader);
   }
 }

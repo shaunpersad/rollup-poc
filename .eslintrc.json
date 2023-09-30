@@ -33,6 +33,7 @@
         ]
       }
     ],
+    "max-classes-per-file": "off",
     "max-len": "off",
     "no-await-in-loop": "off",
     "no-continue": "off",
