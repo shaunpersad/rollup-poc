@@ -1,6 +1,6 @@
 const retryableFetch: typeof fetch = async (...args): Promise<Response> => {
   const response = await fetch(...args);
-  if (response.status === 502) {
+  if (!response.ok) {
     await new Promise((resolve) => {
       setTimeout(resolve, Math.random() * 1000);
     });

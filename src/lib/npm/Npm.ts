@@ -1,22 +1,17 @@
 import { clampedAll } from 'clamped-promise-all';
 import Filesystem, { normalizePath } from '../fs/Filesystem';
-import retryableFetch from '../retryableFetch';
-
-type PackageJson = {
-  version: string,
-  dependencies?: Record<string, string>,
-  files?: string[],
-};
-
-export type PackageLock = {
-  packages?: Record<string, {
-    version: string,
-    resolved: string,
-    dev?: boolean,
-  }>
-};
+import { PackageLock } from './PackageJson';
+import jspmPackageProvider from './package-providers/jspmPackageProvider';
+import skypackPackageProvider from './package-providers/skypackPackageProvider';
+import unpkgPackageProvider from './package-providers/unpkgPackageProvider';
 
 export class NpmError extends Error {}
+
+const PACKAGE_PROVIDERS = {
+  jspm: jspmPackageProvider,
+  skypack: skypackPackageProvider,
+  unpkg: unpkgPackageProvider,
+} as const;
 
 export default class Npm {
   protected readonly filesystem: Filesystem;
@@ -31,43 +26,39 @@ export default class Npm {
       throw new NpmError('no package-lock.json file found.');
     }
     const { packages = {} } = JSON.parse(packageLockFile) as PackageLock;
-    const specificVersions = new Map<string, string>();
+    const versionMap = new Map<string, string>();
     for (const [name, info] of Object.entries(packages)) {
       if (name.startsWith('node_modules/') && !info.dev) {
-        specificVersions.set(name.replace('node_modules/', ''), info.version);
+        versionMap.set(name.replace('node_modules/', ''), info.version);
       }
     }
     await clampedAll(
-      Array.from(specificVersions.entries()).map(
-        ([lockName, version]) => async () => {
-          const name = lockName.split('/node_modules/').pop() || '';
-          const packageJsonLookup = await retryableFetch(`https://ga.jspm.io/npm:${name}@${version}/package.json`, {
-            cf: { cacheEverything: true },
-          });
-          if (!packageJsonLookup.ok) {
-            throw new NpmError(`${packageJsonLookup.url} ${packageJsonLookup.status} ${await packageJsonLookup.text()}`);
-          }
-          const jspmPackageJson = await packageJsonLookup.json<PackageJson>();
-          for (const filePath of jspmPackageJson.files || []) {
-            await this.processMeta(name, version, filePath, `node_modules/${lockName}`);
+      Array.from(versionMap.entries()).map(
+        ([dependency, version]) => async () => {
+          const installPath = `node_modules/${dependency}`;
+          const packageName = dependency.split('/node_modules/').pop() || '';
+          const { files, provider } = await Npm.getFileList(packageName, version);
+          for (const filePath of files) {
+            const normalizedFilePath = normalizePath(filePath);
+            await this.filesystem.createFile(
+              `${installPath}/${normalizedFilePath}`,
+              provider.getLoaderForFile(packageName, version, normalizedFilePath),
+            );
           }
         },
       ),
       parallelism,
     );
+    return versionMap;
   }
 
-  protected async processMeta(name: string, version: string, filePath: string, installPath: string) {
-    const normalizedFilePath = normalizePath(filePath);
-    const loader = async () => {
-      const response = await retryableFetch(`https://ga.jspm.io/npm:${name}@${version}/${normalizedFilePath}`, {
-        cf: { cacheEverything: true },
-      });
-      if (!response.ok) {
-        throw new NpmError(`Could not fetch ${name} ${version} ${filePath}: ${response.status} ${await response.text()}`);
-      }
-      return response.text();
-    };
-    return this.filesystem.createFile(`${installPath}/${normalizedFilePath}`, loader);
+  protected static async getFileList(packageName: string, packageVersion: string) {
+    for (const provider of [PACKAGE_PROVIDERS.jspm, PACKAGE_PROVIDERS.skypack, PACKAGE_PROVIDERS.unpkg]) {
+      try {
+        const files = await provider.getPackageFileList(packageName, packageVersion);
+        return { files, provider };
+      } catch (err) { /* empty */ }
+    }
+    throw new NpmError(`Could not get file list for ${packageName}@${packageVersion}`);
   }
 }

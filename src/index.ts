@@ -7,11 +7,14 @@ import { Env } from './types';
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const filesystem = new Filesystem();
+    const git = new Git(filesystem);
+    const npm = new Npm(filesystem);
+    const bundler = new Bundler(filesystem);
 
     /**
      * Get repo contents
      */
-    await new Git(filesystem).pull({
+    await git.pull({
       token: env.GITHUB_TOKEN,
       owner: 'shaunpersad',
       // repo: 'stockalerter.io-worker',
@@ -21,12 +24,12 @@ export default {
     /**
      * Get all dependencies
      */
-    await new Npm(filesystem).install();
+    await npm.install();
 
     /**
      * Bundle it all together
      */
-    const output = await new Bundler(filesystem).bundle('src/server.ts');
+    const output = await bundler.bundle('src/server.ts');
 
     return new Response(JSON.stringify({ ...output, size: output[0].code.length }, null, 2), {
       headers: {

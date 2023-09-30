@@ -28,15 +28,18 @@ export default class Bundler {
       sourceMap: false,
       declaration: false,
       noDtsResolution: true,
+      removeComments: true,
     };
+    const input = entryPoint;
 
     const bundle = await rollup({
-      input: entryPoint,
+      input,
       maxParallelFileOps: 5,
       output: {
         generatedCode: {
           constBindings: true,
         },
+        format: 'es',
       },
       plugins: [
         {
@@ -53,7 +56,6 @@ export default class Bundler {
               tsHost,
             );
             if (result.resolvedModule) {
-              // console.log(result.resolvedModule);
               return {
                 id: result.resolvedModule.resolvedFileName,
                 external: false,
@@ -61,11 +63,8 @@ export default class Bundler {
             }
             console.log('external:', source, importer);
             return { id: source, external: true };
-            // console.error(JSON.stringify(result, null, 2));
-            // throw new Error(`could not resolve module source: ${source}, importer: ${importer}`);
           },
           load: async (id) => {
-            // console.log('loading', id);
             const text = await this.filesystem.readFile(id);
             if (text) {
               const result = transpileModule(text, {

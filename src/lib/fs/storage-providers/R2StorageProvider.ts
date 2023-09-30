@@ -1,7 +1,7 @@
-import { Env } from '../../types';
-import Storage, { StorageNotFoundError } from './Storage';
+import { Env } from '../../../types';
+import StorageProvider, { StorageProviderObjectNotFoundError } from '../StorageProvider';
 
-export default class R2Storage implements Storage {
+export default class R2StorageProvider implements StorageProvider {
   protected env: Env;
 
   constructor(env: Env) {
@@ -13,7 +13,7 @@ export default class R2Storage implements Storage {
     if (obj) {
       return obj.body;
     }
-    throw new StorageNotFoundError(hash);
+    throw new StorageProviderObjectNotFoundError(hash);
   }
 
   async set(hash: string, body: ReadableStream<ArrayBufferView>, size: number): Promise<void> {
